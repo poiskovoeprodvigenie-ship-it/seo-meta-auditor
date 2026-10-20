@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEO Meta Auditor</title>
+<style>
+  :root { --bg:#f5f6fa; --card:#fff; --text:#1f2430; --muted:#6b7280; --accent:#2563eb;
+          --critical:#f8d7da; --warning:#fff3cd; --info:#e2e3e5; --ok:#d4edda; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text); }
+  header { background:#111827; color:#fff; padding:20px 32px; }
+  header h1 { margin:0; font-size:22px; }
+  header p { margin:4px 0 0; color:#9ca3af; font-size:14px; }
+  main { max-width:1300px; margin:24px auto; padding:0 16px; }
+  .card { background:var(--card); border-radius:10px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-bottom:20px; }
+  label { font-weight:600; font-size:14px; display:block; margin-bottom:6px; }
+  textarea, input[type=text] { width:100%; padding:10px; border:1px solid #d1d5db; border-radius:6px; font:inherit; }
+  textarea { min-height:120px; }
+  .hint { color:var(--muted); font-size:13px; margin:4px 0 14px; }
+  button, .btn { background:var(--accent); color:#fff; border:0; padding:10px 20px; border-radius:6px;
+                 font:inherit; cursor:pointer; text-decoration:none; display:inline-block; }
+  .btn.secondary { background:#059669; }
+  .error { background:var(--critical); padding:12px; border-radius:6px; margin-bottom:16px; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
+  .stat { padding:10px 16px; border-radius:8px; font-weight:600; }
+  .stat.critical{background:var(--critical)} .stat.warning{background:var(--warning)}
+  .stat.info{background:var(--info)} .stat.ok{background:var(--ok)}
+  .stat.total{background:#dbeafe}
+  .tablewrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { padding:8px 10px; border-bottom:1px solid #e5e7eb; text-align:left; vertical-align:top; }
+  th { background:#f9fafb; position:sticky; top:0; }
+  tr.critical td:first-child { border-left:4px solid #dc3545; }
+  tr.warning td:first-child { border-left:4px solid #ffc107; }
+  tr.info td:first-child { border-left:4px solid #9ca3af; }
+  tr.ok td:first-child { border-left:4px solid #28a745; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:10px; margin:1px 2px 1px 0; font-size:12px; }
+  .tag.critical{background:var(--critical)} .tag.warning{background:var(--warning)} .tag.info{background:var(--info)}
+  td.url { max-width:260px; word-break:break-all; }
+  #loader { display:none; margin-left:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>SEO Meta Auditor</h1>
+  <p>Массовая проверка title, description, H1, canonical и кодов ответа по списку URL или sitemap.xml</p>
+</header>
+<main>
+  <form method="post" class="card" onsubmit="document.getElementById('loader').style.display='inline'">
+    <label for="urls">Список URL (по одному в строке)</label>
+    <textarea id="urls" name="urls" placeholder="https://example.com/&#10;https://example.com/about">{{ request.form.get('urls','') }}</textarea>
+    <p class="hint">Или укажите адрес sitemap.xml — тогда список выше игнорируется. Максимум {{ max_urls }} страниц за проверку.</p>
+    <label for="sitemap">Адрес sitemap.xml</label>
+    <input type="text" id="sitemap" name="sitemap" placeholder="https://example.com/sitemap.xml" value="{{ request.form.get('sitemap','') }}">
+    <p></p>
+    <button type="submit">Проверить</button><span id="loader">Идёт проверка, подождите…</span>
+  </form>
+
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  {% if summary %}
+  <div class="card">
+    <div class="stats">
+      <div class="stat total">Проверено: {{ summary.total }}</div>
+      <div class="stat critical">Критичные: {{ summary.critical }}</div>
+      <div class="stat warning">Предупреждения: {{ summary.warning }}</div>
+      <div class="stat info">Замечания: {{ summary.info }}</div>
+      <div class="stat ok">Без проблем: {{ summary.ok }}</div>
+      <a class="btn secondary" href="/export">Скачать Excel</a>
+    </div>
+    <div class="tablewrap">
+    <table>
+      <tr><th>URL</th><th>Код</th><th>Title</th><th>Description</th><th>H1</th><th>Проблемы</th></tr>
+      {% for r in rows %}
+      <tr class="{{ r.level }}">
+        <td class="url"><a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.url }}</a></td>
+        <td>{{ r.status or '—' }}</td>
+        <td>{{ r.title }} <small>({{ r.title|length }})</small></td>
+        <td>{{ r.description }} <small>({{ r.description|length }})</small></td>
+        <td>{{ r.h1 }}</td>
+        <td>{% for lvl, msg in r.issues %}<span class="tag {{ lvl }}">{{ msg }}</span>{% else %}✔{% endfor %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    </div>
+  </div>
+  {% endif %}
+</main>
+</body>
+</html>
