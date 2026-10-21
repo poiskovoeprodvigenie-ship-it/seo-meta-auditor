@@ -1,18 +1,97 @@
 """Flask-интерфейс SEO Meta Auditor."""
+import hmac
 import io
+import json
+import os
+import re
+import secrets
+import time
 
 import requests
-from flask import Flask, render_template, request, send_file
+from flask import Flask, Response, render_template, request, send_file, session
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 import auditor
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(BASE_DIR, "results")
+RESULTS_TTL = 24 * 3600  # результаты старше суток удаляются
+
+try:  # необязательный локальный файл с логином/паролем (в git не попадает)
+    import config_local
+except ImportError:
+    config_local = None
+
+
+def setting(name, default=""):
+    """Значение из переменной окружения или из config_local.py."""
+    return os.environ.get(name) or getattr(config_local, name, default)
+
+
+def load_secret_key():
+    key = setting("SECRET_KEY")
+    if key:
+        return key
+    path = os.path.join(BASE_DIR, ".secret_key")
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            f.write(secrets.token_hex(32))
+    with open(path) as f:
+        return f.read().strip()
+
+
 app = Flask(__name__)
-LAST_RESULT = {"rows": []}  # MVP: результат последней проверки хранится в памяти
+app.secret_key = load_secret_key()
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+app.config["AUTH_REQUIRED"] = True  # при локальном запуске без пароля отключается ниже
 
 FILLS = {"critical": "F8D7DA", "warning": "FFF3CD", "info": "E2E3E5", "ok": "D4EDDA"}
+
+
+@app.before_request
+def require_auth():
+    if not app.config["AUTH_REQUIRED"]:
+        return None
+    user, password = setting("APP_USER"), setting("APP_PASSWORD")
+    if not password:
+        return Response("Не задан APP_PASSWORD: сервис закрыт. См. config_local.example.py", 503)
+    auth = request.authorization
+    ok = (auth is not None
+          and hmac.compare_digest(auth.username or "", user)
+          and hmac.compare_digest(auth.password or "", password))
+    if not ok:
+        return Response("Нужна авторизация", 401,
+                        {"WWW-Authenticate": 'Basic realm="SEO Meta Auditor"'})
+    return None
+
+
+def _result_path():
+    token = session.get("rid", "")
+    return os.path.join(RESULTS_DIR, token + ".json") if re.fullmatch(r"[0-9a-f]{32}", token) else None
+
+
+def save_rows(rows):
+    """Сохраняет результат проверки для текущего пользователя (по cookie-сессии)."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    now = time.time()
+    for name in os.listdir(RESULTS_DIR):
+        full = os.path.join(RESULTS_DIR, name)
+        if name.endswith(".json") and now - os.path.getmtime(full) > RESULTS_TTL:
+            os.remove(full)
+    if not re.fullmatch(r"[0-9a-f]{32}", session.get("rid", "")):
+        session["rid"] = secrets.token_hex(16)
+    with open(_result_path(), "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False)
+
+
+def load_rows():
+    path = _result_path()
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -29,10 +108,12 @@ def index():
                 error = "Добавьте хотя бы один URL или адрес sitemap.xml"
             else:
                 rows = auditor.run_audit(urls)
-                LAST_RESULT["rows"] = rows
+                save_rows(rows)
                 summary = {lvl: sum(r["level"] == lvl for r in rows)
                            for lvl in ("critical", "warning", "info", "ok")}
                 summary["total"] = len(rows)
+        except auditor.UnsafeURL as exc:
+            error = f"Адрес sitemap не разрешён: {exc}"
         except requests.RequestException as exc:
             error = f"Не удалось загрузить sitemap: {type(exc).__name__}"
     return render_template("index.html", rows=rows, error=error, summary=summary,
@@ -41,7 +122,7 @@ def index():
 
 @app.route("/export")
 def export():
-    rows = LAST_RESULT["rows"]
+    rows = load_rows()
     if not rows:
         return "Сначала запустите проверку", 400
     wb = Workbook()
@@ -69,4 +150,7 @@ def export():
 
 
 if __name__ == "__main__":
-    app.run(debug=False, port=5000)
+    # локальный запуск: без пароля сервис доступен только с этого компьютера
+    if not setting("APP_PASSWORD"):
+        app.config["AUTH_REQUIRED"] = False
+    app.run(debug=False, host="127.0.0.1", port=5000)

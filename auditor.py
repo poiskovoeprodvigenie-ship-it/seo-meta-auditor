@@ -1,8 +1,10 @@
 """Ядро SEO Meta Auditor: загрузка страниц, извлечение мета-данных, поиск проблем."""
+import ipaddress
 import re
+import socket
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -10,6 +12,48 @@ from bs4 import BeautifulSoup
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SEOMetaAuditor/1.0)"}
 TIMEOUT = 10
 MAX_URLS = 200
+MAX_REDIRECTS = 5
+ALLOWED_PORTS = (80, 443)
+
+
+class UnsafeURL(ValueError):
+    """Адрес запрещён: не http(s), нестандартный порт или ведёт во внутреннюю сеть."""
+
+
+def check_url_safe(url):
+    """Не даёт сервису ходить на localhost и внутренние адреса (защита от SSRF)."""
+    parts = urlparse(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise UnsafeURL("разрешены только http(s)-адреса")
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        raise UnsafeURL("некорректный порт")
+    if port not in ALLOWED_PORTS:
+        raise UnsafeURL("разрешены только порты 80 и 443")
+    try:
+        infos = socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise UnsafeURL("домен не найден")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global:
+            raise UnsafeURL("адрес ведёт во внутреннюю сеть")
+
+
+def safe_get(url):
+    """GET с ручной обработкой редиректов: каждый переход проверяется заново."""
+    for _ in range(MAX_REDIRECTS + 1):
+        check_url_safe(url)
+        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=False)
+        if resp.is_redirect or resp.is_permanent_redirect:
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+            url = urljoin(url, location)
+            continue
+        return resp
+    raise requests.TooManyRedirects("слишком много редиректов")
 
 TITLE_RANGE = (30, 65)
 DESC_RANGE = (70, 165)
@@ -32,7 +76,7 @@ def parse_urls(text):
 
 def urls_from_sitemap(sitemap_url):
     """Возвращает список URL из sitemap.xml (поддерживает вложенные sitemap-индексы)."""
-    resp = requests.get(sitemap_url, headers=HEADERS, timeout=TIMEOUT)
+    resp = safe_get(sitemap_url)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.content, "xml")
     locs = [loc.get_text(strip=True) for loc in soup.find_all("loc")]
@@ -41,7 +85,7 @@ def urls_from_sitemap(sitemap_url):
         for sub in locs[:5]:
             try:
                 urls += urls_from_sitemap(sub)
-            except requests.RequestException:
+            except (requests.RequestException, UnsafeURL):
                 continue
             if len(urls) >= MAX_URLS:
                 break
@@ -54,7 +98,10 @@ def audit_url(url):
     row = {"url": url, "status": None, "title": "", "description": "",
            "h1": "", "h1_count": 0, "canonical": "", "robots": "", "error": ""}
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
+        resp = safe_get(url)
+    except UnsafeURL as exc:
+        row["error"] = f"адрес запрещён: {exc}"
+        return row
     except requests.RequestException as exc:
         row["error"] = type(exc).__name__
         return row

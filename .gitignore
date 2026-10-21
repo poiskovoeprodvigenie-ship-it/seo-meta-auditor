@@ -4,3 +4,7 @@ __pycache__/
 venv/
 *.xlsx
 .env
+config_local.py
+.secret_key
+results/
+*.rar
